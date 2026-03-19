@@ -1,340 +1,235 @@
-# Debian Worktop
+# Debian Worktop ISO Builder
+### `Debian-toram-v3.sh` — Version 3 (Stable)
 
-A high-performance Debian Trixie (13) system that runs entirely from RAM, with a clean two-system design for easy upgrades and package management.
-
----
-
-## Architecture
-
-```
-Single disk, two systems:
-
-┌──────────────────────────────────────────────────────────────┐
-│  p1  EFI           512 MiB  FAT32                            │
-│  p2  WORKTOP_BOOT    4 GiB  ext4   squashfs + kernels + GRUB │
-│  p3  WORKTOP_ROOT    N GiB  ext4   BASE SYSTEM               │
-│  p4  PERSIST        rest    LUKS2  overlay persistence       │
-└──────────────────────────────────────────────────────────────┘
-```
-
-### BASE SYSTEM  (p3, WORKTOP_ROOT)
-
-A normal, fully installed Debian. This is where you manage packages and configuration. You boot into this system to:
-- Install or remove packages with `apt`
-- Edit configuration files
-- Add custom repos or PPAs
-- Apply any system changes
-
-When you are done making changes, run `sudo update-worktop` from here to publish them to the live system.
-
-### LIVE / TORAM SYSTEM  (p2, WORKTOP_BOOT)
-
-On each boot, the squashfs on the BOOT partition is copied entirely into RAM. Everything — every file read, every process — runs at memory speed. There is no further disk I/O during normal use.
-
-Changes you make while in the live system are saved to the LUKS-encrypted PERSIST partition and restored on next boot.
+A single-script builder that produces a minimal **Debian Trixie (13)** GNOME Live ISO with:
+- **Toram mode** — the entire squashfs is loaded into RAM at boot for maximum I/O performance
+- **Encrypted persistence** — your overlay changes survive reboots via a LUKS2-encrypted partition
+- **Fast clone installer** — installs the live system to a real disk in minutes using `unsquashfs`
+- **Self-updating** — `update-worktop` regenerates the squashfs and GRUB entries in-place
 
 ---
 
-## Everyday workflow
+## Requirements
 
-```
-1. Boot into BASE SYSTEM
-   ↓
-2. Make your changes
-   sudo apt install neovim htop
-   sudo apt install linux-image-6.x.x-xanmod  (or any kernel)
-   sudo apt upgrade
-   (any changes you want)
-   ↓
-3. Publish to live system
-   sudo update-worktop
-   ↓
-4. Reboot → select "Debian Worktop (TORAM LIVE)" in GRUB
-   ↓
-5. Running at full RAM speed with your changes baked in
+### Host System
+Run on a **Debian/Ubuntu host** with the following packages installed:
+
+```bash
+sudo apt install mmdebstrap xorriso squashfs-tools mtools \
+     grub-efi-amd64-bin grub-pc-bin dosfstools isolinux syslinux-common
 ```
 
-That's it. No chroots, no package lists to maintain, no special commands for installing software. You use the base system exactly like a normal Debian machine.
+### Hardware (Target Machine)
+| Component | Minimum | Recommended |
+|-----------|---------|-------------|
+| RAM | 4 GB | 8 GB+ (squashfs is ~1.3 GB loaded into RAM) |
+| Disk | 25 GB | 40 GB+ |
+| Boot | UEFI or Legacy BIOS | UEFI |
+| Architecture | x86_64 | x86_64 |
 
 ---
 
 ## Building the ISO
 
-### Host dependencies
-
 ```bash
-apt-get install mmdebstrap xorriso squashfs-tools mtools \
-    grub-efi-amd64-bin dosfstools isolinux syslinux-common
+sudo bash Debian-toram-v3.sh
 ```
 
-### Build
+The build takes 10–30 minutes depending on your internet speed and CPU. The finished ISO is written to:
 
-```bash
-chmod +x Debian-toram.sh
-sudo ./Debian-toram.sh
-# ISO written to: ./worktop-build/debian-worktop-13-live.iso
+```
+./worktop-build/debian-worktop-13-live.iso
 ```
 
-### Configuration (top of script)
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `LIVE_USER` | `ebram` | Default username |
-| `SQUASHFS_COMP_LEVEL` | `19` | zstd compression level (1–22) |
-
-#### Compression level guide
-
-| Level | Build time | Squashfs size | RAM used | Recommended for |
-|-------|-----------|--------------|----------|-----------------|
-| 1 | ~2 min | largest | most | CI / testing only |
-| 9 | ~5 min | medium | moderate | low-RAM machines |
-| 19 | ~15 min | small | least | **daily use (default)** |
-| 22 | ~40 min | marginally smaller | — | rarely worth it |
-
-Higher compression = smaller file loaded into RAM on every boot = both less RAM consumed and faster boot. The compression cost is paid once, when building or updating.
-
----
-
-## Writing to USB
+Write it to a USB drive:
 
 ```bash
-sudo dd if=worktop-build/debian-worktop-13-live.iso \
-        of=/dev/sdX bs=4M status=progress oflag=sync
+sudo dd if=./worktop-build/debian-worktop-13-live.iso of=/dev/sdX bs=4M status=progress && sync
 ```
 
 ---
 
-## Installing to disk
+## Disk Layout (After Install)
 
-Boot the ISO, open a terminal:
+`install-worktop` creates four GPT partitions automatically:
+
+```
+┌──────────────┬─────────────────┬──────────┬──────────┐
+│  Partition   │  Label          │  Size    │  Use     │
+├──────────────┼─────────────────┼──────────┼──────────┤
+│  /dev/sdX1   │  ESP (FAT32)    │  512 MiB │  EFI     │
+│  /dev/sdX2   │  WORKTOP_BOOT   │  ~4 GB   │  /boot   │
+│  /dev/sdX3   │  WORKTOP_ROOT   │  Custom  │  /       │
+│  /dev/sdX4   │  PERSIST        │  Rest    │  LUKS2   │
+└──────────────┴─────────────────┴──────────┴──────────┘
+```
+
+The PERSIST partition (`/dev/sdX4`) is encrypted with **LUKS2** and formatted ext4 inside.
+It is managed entirely by `worktop-sync.service` — never mounted automatically at boot via crypttab.
+
+---
+
+## Installing to Disk
+
+Boot the live ISO, open a terminal, and run:
 
 ```bash
 sudo install-worktop
 ```
 
-You will be asked for:
-1. Target disk (e.g. `/dev/sda`, `/dev/nvme0n1`)
-2. `YES` confirmation
-3. ROOT partition size in GB (default: 20)
-4. A LUKS password for the PERSIST partition
+You will be prompted for:
+1. Target disk (e.g. `/dev/sda`)
+2. Confirmation (`YES` to proceed — **erases all data**)
+3. Root partition size in GB (default: 20)
+4. A LUKS passphrase for the PERSIST partition (set twice)
 
-The installer creates both systems and configures GRUB automatically.
+> **NVMe disks** (`/dev/nvme0n1` etc.) are detected automatically and partition names are suffixed with `p1`, `p2`, etc.
 
 ---
 
-## First boot after installation
+## Boot Modes
 
-GRUB shows two entries:
+After installation, GRUB offers two entries:
+
+### 1. Debian Worktop (TORAM LIVE) ← Use this for daily use
+The squashfs is loaded into RAM. Persistence is **active** — the sync engine unlocks the LUKS
+partition and restores your overlay on boot, and saves it on shutdown/reboot.
+
+### 2. Standard Debian Root Boot
+Boots directly into the installed root filesystem. Fast and stable but **persistence is disabled**
+— the overlay sync engine does not run without a live environment.
+
+> Always use the **TORAM LIVE** entry for day-to-day use if you want changes to persist.
+
+---
+
+## How Persistence Works
 
 ```
-Debian GNU/Linux               ← BASE SYSTEM  (use this to manage packages)
-Debian Worktop (TORAM LIVE)    ← LIVE SYSTEM  (runs from RAM)
+Boot
+ └─ worktop-sync.service starts
+     └─ Prompts for LUKS passphrase on /dev/console
+     └─ Unlocks PERSIST → mounts to /mnt/worktop-persist
+     └─ rsync: /mnt/worktop-persist/upper/ → live overlay (rw/)
+     └─ Display manager starts
+
+Running
+ └─ worktop-sync-periodic.timer fires every 5 minutes
+     └─ rsync: live overlay (rw/) → /mnt/worktop-persist/upper/
+
+Shutdown / Reboot
+ └─ worktop-sync.service stops
+     └─ Final rsync: live overlay → /mnt/worktop-persist/upper/
+     └─ umount /mnt/worktop-persist
+     └─ cryptsetup luksClose worktop-persist  ← clean LUKS teardown
 ```
 
-**Boot the BASE SYSTEM first.** Then:
+The overlay path (`rw/` directory) is captured into `/run/worktop-overlay-path` at restore time
+so the save path can find it even if the overlay has already been torn down by live-boot during reboot.
+
+---
+
+## Updating the System
+
+While booted into the TORAM LIVE entry, run:
 
 ```bash
-# Change default passwords
-passwd
-sudo passwd root
-
-# Install anything you want
-sudo apt update && sudo apt upgrade
-sudo apt install your-packages
-
-# Publish changes to the live system
 sudo update-worktop
-
-# Reboot into the live system
-sudo reboot
 ```
+
+This will:
+1. Prompt for your LUKS passphrase to wipe the old persistent overlay (prevents stale-overlay conflicts)
+2. Rebuild `filesystem.squashfs` from the live root using zstd compression
+3. Copy the new kernel and initrd into `/boot/live/kernels/`
+4. Regenerate GRUB entries via `/etc/grub.d/41_worktop`
+5. Run `update-grub`
+
+After reboot the new squashfs is loaded into RAM from the updated boot partition.
 
 ---
 
-## Default credentials
+## Default Credentials
 
 | Account | Password |
-|---------|---------|
+|---------|----------|
+| `ebram` (live user) | `worktop` |
 | `root` | `worktop` |
-| `ebram` | `worktop` |
 
-Change both on first boot.
-
----
-
-## Installing and updating packages
-
-### In the base system (permanent — survives all future updates)
-
-Boot into the base system and use `apt` normally:
-
-```bash
-sudo apt install htop neovim tmux
-sudo apt install linux-xanmod-x64v3   # custom kernel, see below
-sudo apt upgrade
-```
-
-Then rebuild the live squashfs:
-
-```bash
-sudo update-worktop
-```
-
-### Example: XanMod kernel
-
-```bash
-# Boot into BASE SYSTEM, then:
-
-# 1. Add the XanMod repo
-wget -qO - https://dl.xanmod.org/archive.key \
-    | gpg --dearmor \
-    | sudo tee /usr/share/keyrings/xanmod-archive-keyring.gpg > /dev/null
-
-echo "deb [signed-by=/usr/share/keyrings/xanmod-archive-keyring.gpg] \
-    http://deb.xanmod.org releases main" \
-    | sudo tee /etc/apt/sources.list.d/xanmod.list
-
-sudo apt update
-
-# 2. Check your CPU level (x64v1/v2/v3/v4)
-#    v1 = any x86-64
-#    v2 = AVX/AVX2 (most CPUs since ~2013)
-#    v3 = AVX2 + AVX512 (Haswell / Zen3+)
-#    v4 = AVX512-heavy (Skylake-X / Zen4)
-grep -m1 flags /proc/cpuinfo | grep -c avx512   # 0=v2, 1+=v3 or v4
-
-# 3. Install
-sudo apt install linux-xanmod-x64v3
-
-# 4. Publish to live system
-sudo update-worktop
-# → reboot → both kernels appear in GRUB under "Debian Worktop (TORAM LIVE)"
-```
-
-Because the XanMod repo and package are installed in the base system, every future `sudo apt upgrade && sudo update-worktop` will also upgrade the XanMod kernel automatically.
-
-### In the live system (temporary — wiped on next update-worktop)
-
-If you just want to try something without making it permanent, you can `apt install` directly in the live system. Changes are saved to PERSIST and survive reboots — but the next time you run `update-worktop` from the base system, the overlay is wiped and the change is lost.
-
-Use the live system for:
-- Testing a package before committing to it
-- Session-only tools you don't want permanently
-- Anything you want to undo cleanly
+> Change these immediately after installation with `passwd`.
 
 ---
 
-## update-worktop
+## Included Software
 
-Run from the **BASE SYSTEM** only.
-
-```bash
-sudo update-worktop
-```
-
-What it does:
-
-| Step | Action |
-|------|--------|
-| 1 | `mksquashfs /` → `/boot/live/filesystem.squashfs.new` |
-| 2 | Atomic `mv` replaces the live squashfs (power-safe) |
-| 3 | Copies all `/boot/vmlinuz-*` to `/boot/live/kernels/` |
-| 4 | Updates GRUB entries |
-| 5 | Wipes PERSIST overlay (required — old overlay doesn't match new base) |
-| 6 | Prompts to reboot |
-
-**Why is the overlay wiped?**
-The overlay stores the diff between the squashfs and your live changes. After the squashfs is rebuilt from a different base, the old diff no longer applies cleanly — it references file paths and versions from the old system. Wiping it gives the live system a clean start on the new base.
-
-**How long does it take?**
-Mostly the `mksquashfs` compression step. At level 19 on 8 cores: roughly 10–20 minutes depending on how much is installed. This runs in the base system — the live system is untouched and the old squashfs remains valid until the atomic swap at the end.
-
----
-
-## Persistence (live system only)
-
-Changes made in the live/toram system are saved to the LUKS-encrypted PERSIST partition and restored on every boot.
-
-| Event | Action |
-|-------|--------|
-| Boot | LUKS unlocked, saved state rsync'd into live overlay |
-| Every 5 min | Overlay saved to PERSIST (background) |
-| Shutdown | Final sync + luksClose |
-
-### LUKS password prompt
-
-The prompt appears on **tty12** so it never conflicts with the login screen.
-
-If the screen looks blank after the toram copy:
-```
-Press Ctrl+Alt+F12
-```
-Type your LUKS password and press Enter. Nothing appears while typing — normal.
-
-### Monitoring
-
-```bash
-tail -f /var/log/worktop-sync.log     # watch sync activity
-systemctl status worktop-sync.service  # service status
-sudo worktop-sync-engine --sync        # force save right now
-```
+| Category | Package |
+|----------|---------|
+| Desktop | GNOME Core, GNOME Terminal |
+| Browser | Firefox ESR |
+| Disk tools | parted, cryptsetup |
+| Utilities | rsync, curl, wget, vim, sudo |
+| Live system | live-boot, live-config, live-config-systemd |
+| Bootloader | grub-efi-amd64, grub-pc |
 
 ---
 
 ## Troubleshooting
 
-### "You are running inside the live/toram system"
+### LUKS password rejected at boot console
+Caused by the raw kernel console sending `CR+LF` instead of `LF` on Enter. The script uses
+`stty sane` before reading and strips residual `\r` from the password string. If this still
+occurs, verify the ISO was rebuilt from **v3** of the script.
 
-`update-worktop` detected an active overlayfs and refused to run.  
-Boot into **Debian GNU/Linux** (the base system entry in GRUB), not the Toram Live entry.
+### Screen stuck at `=== Worktop Persistence ===`
+The LUKS prompt is waiting for keyboard input. Type your passphrase and press Enter.
+Characters will not be echoed — that is expected, echo is disabled during password entry.
 
-### Live system not reflecting changes after update-worktop
+### System hangs at LUKS prompt on boot (not the Worktop prompt)
+You have an old installation where `/etc/crypttab` contains `luks` without `noauto`.
+This causes systemd-cryptsetup to attempt a second unlock at initramfs stage.
+Fix it in a recovery shell:
 
-Make sure you rebooted into the TORAM LIVE entry after `update-worktop` finished. The running live session is a RAM snapshot — it does not hot-reload.
-
-### Persistence not working
-
-Check the sync log:
 ```bash
-tail -50 /var/log/worktop-sync.log
+# chroot into installed root, then:
+sed -i 's/none luks,/none luks,noauto,/' /etc/crypttab
+update-initramfs -u
 ```
 
-Force a manual save:
+### Changes not saved after reboot
+Confirm you are booting the **TORAM LIVE** GRUB entry — the standard root boot does not
+activate the sync engine. Check service status in the live session:
+
 ```bash
-sudo worktop-sync-engine --sync
+systemctl status worktop-sync.service
+journalctl -u worktop-sync.service
 ```
 
-### Wipe persistence (start fresh in live system)
-
-Boot the base system:
-```bash
-sudo cryptsetup luksOpen /dev/disk/by-partlabel/PERSIST worktop-persist
-sudo mount /dev/mapper/worktop-persist /mnt
-sudo rm -rf /mnt/upper/*
-sudo umount /mnt
-sudo cryptsetup luksClose worktop-persist
-```
-Reboot into TORAM LIVE — it starts clean.
+### `install-worktop` fails with "Cannot find filesystem.squashfs"
+The installer looks for the squashfs on the live medium at `/run/live/medium/live/`.
+Ensure you booted from the correct ISO and the USB is still mounted.
 
 ---
 
-## Custom scripts reference
+## File Reference
 
-| Script | Runs on | Purpose |
-|--------|---------|---------|
-| `install-worktop` | Live ISO | Partition disk, clone both systems, install GRUB |
-| `update-worktop` | BASE system | Squash `/` → rebuild live squashfs |
-| `worktop-sync-engine` | Live system | Manage PERSIST overlay (called by systemd) |
+| Path | Description |
+|------|-------------|
+| `/usr/local/bin/install-worktop` | Fast clone installer |
+| `/usr/local/bin/update-worktop` | Rebuilds squashfs + GRUB entries |
+| `/usr/local/bin/worktop-sync-engine` | Overlay ↔ PERSIST rsync engine |
+| `/etc/systemd/system/worktop-sync.service` | Restore on boot / save on stop |
+| `/etc/systemd/system/worktop-sync-periodic.timer` | 5-minute periodic save timer |
+| `/etc/grub.d/41_worktop` | GRUB submenu generated by update-worktop |
+| `/run/worktop-overlay-path` | Runtime: captured overlay path (tmpfs, not persistent) |
+| `/run/worktop-no-sync` | Runtime: flag set by update-worktop to skip final save |
+| `/boot/live/filesystem.squashfs` | Squashfs loaded into RAM at boot |
+| `/boot/live/kernels/<version>/` | Kernel + initrd per installed kernel version |
 
 ---
 
-## Architecture notes
+## Version History
 
-**Why squash `/` directly instead of using a chroot?**
-The base system IS the source of truth. Squashing it directly means what you test in the base system is exactly what runs in the live system — no translation layer, no config files to maintain, no risk of the two systems drifting apart.
-
-**Why keep the base system at all?**
-The live system runs from an immutable squashfs. You cannot persist package installs through initramfs or GRUB — they need to be baked into the squashfs. The base system is a stable Debian environment to do that baking in, using normal tools (`apt`, `dpkg`, `make install`, etc.).
-
-**Why drop VFS caches after restore?**
-When the overlay's upper directory is populated by rsync while the overlay is already mounted, the kernel's dentry cache still holds stale "not found" entries cached from before the files arrived. Dropping caches forces a re-validation so restored files become visible immediately.
+| Version | Changes |
+|---------|---------|
+| v1 | Initial build — toram ISO, GNOME, installer |
+| v2 | Added encrypted LUKS persistence, sync engine, periodic timer |
+| v3 (current) | Fixed invisible console password prompt (`stty sane`, `\r` strip); fixed double LUKS unlock at boot (`noauto` in crypttab); fixed reboot race condition (overlay path state file, `Before=umount.target`); added clean LUKS teardown on shutdown/reboot (`ExecStopPost`) |
